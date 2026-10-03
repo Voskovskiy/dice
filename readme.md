@@ -55,6 +55,29 @@ Optional callback functions can be passed into both start_throw() and bind_swipe
     }
 ```
 
+### Rolling to a predetermined result
+
+If the outcome is decided elsewhere (a server, a game engine, a log replay) and the dice should only animate it, call animate_results(). No swipe or other input is needed; the result is fixed before the dice are thrown, and after_roll is called once they stop moving.
+
+```javascript
+    var started = box.animate_results(
+        [{ type: 'd20', value: 17 }, { type: 'd6', value: 3 }],
+        function(notation) {
+            console.log(notation.resultString); // "17 3 = 20"
+        }
+    );
+```
+
+- Returns `true` when the animation started, `false` if dice are already rolling (the callback is not called in that case).
+- Throws if the array is empty, a type is unknown, or a value isn't on that die. Valid values: d4, d6, d8, d12, d20: 1 to max; d9: 0-9; d10: 1-10; d100: 0, 10 ... 90.
+- d100 is the tens die only. For a percentile roll of 47, pass `{ type: 'd100', value: 40 }` and `{ type: 'd9', value: 7 }`.
+- The outcome is simulated up front (about 90 ms of main-thread time for 10 dice), then the same throw is replayed with the faces relabelled so the pre-computed result lands face up. The dice still tumble and collide normally.
+- Browsers can block the roll sound when no user gesture has happened yet; the roll still plays, silently.
+
+The same thing can be done with the existing hooks: return the results from `before_roll`, or put them after an `@` in the notation passed to setDice(), ex: `"1d20+1d6@17 3"`.
+
+Open `test-forced-results.html?auto` in a browser to check every value of every die type; it should end with `"problems": []`.
+
 Dice notation object structured as follows:
 
 ```javascript

@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="en"><head><meta charset="UTF-8"><title>forced results test</title>
+<style>
+html, body { margin: 0; background: #222; color: #ddd; font: 13px monospace; }
+#diceRoller { width: 800px; height: 500px; position: relative; }
+pre { margin: 8px; white-space: pre-wrap; }
+</style></head><body>
+<div id="diceRoller"></div>
+<pre id="log">Open the console and call runAll(), or add ?auto to the URL.</pre>
+<script src="libs/three.min.js"></script>
+<script src="libs/cannon.min.js"></script>
+<script src="libs/teal.js"></script>
+<script src="dice.js"></script>
+<script>
+// Checks that box.animate_results() shows exactly the requested results:
+//  1. every value of every die type comes back as asked
+//  2. each relabelled die still has one distinct label per face
+//  3. random mixed sets, repeated
+//  4. bad input throws, and a second call while rolling returns false
+var box = new DICE.dice_box(document.getElementById('diceRoller'));
+var log = document.getElementById('log');
+var FACES = { d4: 4, d6: 6, d8: 8, d9: 10, d10: 10, d12: 12, d20: 20, d100: 10 };
+var VALUES = {
+    d4: [1, 4], d6: [1, 6], d8: [1, 8], d9: [0, 9], d10: [1, 10], d12: [1, 12], d20: [1, 20], d100: [0, 90]
+};
+function values(type) {
+    var out = [], step = type == 'd100' ? 10 : 1;
+    for (var v = VALUES[type][0]; v <= VALUES[type][1]; v += step) out.push(v);
+    return out;
+}
+
+function roll(dice) {
+    return new Promise(function(resolve) {
+        var t0 = performance.now();
+        var started = box.animate_results(dice, function(n) {
+            var labels = box.dices.map(function(d) {
+                var s = {};
+                d.geometry.faces.forEach(function(f) { if (f.materialIndex) s[f.materialIndex] = 1; });
+                return Object.keys(s).length;
+            });
+            resolve({ got: n.result.slice(), total: n.resultTotal, labels: labels, ms: performance.now() - t0 });
+        });
+        if (!started) resolve(null);
+    });
+}
+
+function check(dice, r, problems) {
+    dice.forEach(function(d, i) {
+        if (r.got[i] !== d.value) problems.push(d.type + ': asked ' + d.value + ', got ' + r.got[i]);
+        if (r.labels[i] !== FACES[d.type]) problems.push(d.type + ': ' + r.labels[i] + ' distinct labels, expected ' + FACES[d.type]);
+    });
+}
+
+window.runAll = async function() {
+    var problems = [], rolls = 0, ms = [];
+    // 1 + 2: every value of every type, 10 dice per roll
+    for (var type in VALUES) {
+        var vals = values(type);
+        for (var i = 0; i < vals.length; i += 10) {
+            var dice = vals.slice(i, i + 10).map(function(v) { return { type: type, value: v }; });
+            var r = await roll(dice); rolls++; ms.push(r.ms);
+            check(dice, r, problems);
+        }
+    }
+    // 3: random mixed sets
+    var types = Object.keys(VALUES);
+    for (var k = 0; k < 15; k++) {
+        var n = 1 + Math.floor(Math.random() * 8);
+        var dice = [];
+        for (var j = 0; j < n; j++) {
+            var t = types[Math.floor(Math.random() * types.length)], vs = values(t);
+            dice.push({ type: t, value: vs[Math.floor(Math.random() * vs.length)] });
+        }
+        var r = await roll(dice); rolls++; ms.push(r.ms);
+        check(dice, r, problems);
+    }
+    // 4: validation + busy
+    var bad = [[], null, [{ type: 'd7', value: 1 }], [{ type: 'd6', value: 7 }], [{ type: 'd6', value: 0 }],
+        [{ type: 'd6', value: 2.5 }], [{ type: 'd100', value: 45 }], [{ type: 'd10', value: 0 }], [{ type: 'd6' }]];
+    bad.forEach(function(b) {
+        try { box.animate_results(b); problems.push('no throw for ' + JSON.stringify(b)); } catch (e) {}
+    });
+    if (box.rolling) problems.push('box left rolling after bad input');
+    var busyCalled = false;
+    var first = roll([{ type: 'd20', value: 20 }]);
+    if (box.animate_results([{ type: 'd6', value: 1 }], function() { busyCalled = true; }) !== false) problems.push('busy call did not return false');
+    await first; await new Promise(function(r) { setTimeout(r, 200); });
+    if (busyCalled) problems.push('callback fired for a rejected (busy) call');
+
+    var summary = { rolls: rolls, problems: problems, avg_ms: Math.round(ms.reduce(function(a, b) { return a + b; }, 0) / ms.length) };
+    log.textContent = JSON.stringify(summary, null, 1);
+    return summary;
+};
+if (location.search.indexOf('auto') >= 0) runAll();
+</script></body></html>

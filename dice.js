@@ -21,6 +21,9 @@
  * - adding sound effect
  * - adding roll results to notation returned in after_roll callback
  * - adding 'd9' option (d10 to be added to d100 properly)
+ * - adding animate_results() to play a predetermined result without user input
+ * - fixing forced results for d9/d10/d100 (face relabelling used the wrong modulus, d100 tens were ignored)
+ * - sound no longer throws when the browser blocks autoplay
  */
 
 const DICE = (function() {
@@ -195,6 +198,23 @@ const DICE = (function() {
         throw_dices(box, vector, boost, dist, before_roll, after_roll);
     }
 
+    // @brief roll dice to predetermined results, no swipe needed; the outcome is fixed upfront and only the animation is played
+    // @param dice array of the dice to show, ex: [{ type: 'd20', value: 17 }, { type: 'd6', value: 3 }]
+    //        valid values: d4-d8, d12, d20: 1..max; d9: 0..9; d10: 1..10; d100 (tens die): 0, 10 ... 90
+    // @param after_roll (optional) callback function called once the dice stop moving; receives the notation with results
+    // @return true if the animation started, false if dice are already rolling (after_roll will not be called)
+    // @throws if dice is empty or contains an unknown type or a value that isn't on that die
+    that.dice_box.prototype.animate_results = function(dice, after_roll) {
+        var box = this;
+        if (box.rolling) return false;
+        var notation = notation_from_results(dice);
+        var vector = { x: (rnd() * 2 - 1) * box.w, y: -(rnd() * 2 - 1) * box.h };
+        var dist = Math.sqrt(vector.x * vector.x + vector.y * vector.y);
+        var boost = (rnd() + 3) * dist;
+        throw_dices(box, vector, boost, dist, null, after_roll, notation);
+        return true;
+    }
+
     //call this to roll dice from swipe (will throw dice in direction swiped)
     that.dice_box.prototype.bind_swipe = function(container, before_roll, after_roll) {
         let box = this;
@@ -218,11 +238,12 @@ const DICE = (function() {
         });
     }
 
-    function throw_dices(box, vector, boost, dist, before_roll, after_roll) {
+    //@param forced_notation (optional) - use this instead of box.diceToRoll; notation.result is the outcome to show
+    function throw_dices(box, vector, boost, dist, before_roll, after_roll, forced_notation) {
         var uat = vars.use_adapvite_timestep;
 
         vector.x /= dist; vector.y /= dist;
-        var notation = that.parse_notation(box.diceToRoll);
+        var notation = forced_notation || that.parse_notation(box.diceToRoll);
         if (notation.set.length == 0) return;
         //TODO: how do large numbers of vectors affect performance?
         var vectors = box.generate_vectors(notation, vector, boost);
@@ -669,6 +690,30 @@ const DICE = (function() {
         return Math.random();
     }
 
+    //builds a notation from [{ type, value }], throws if any die or value is invalid
+    function notation_from_results(dice) {
+        if (!Array.isArray(dice) || dice.length == 0) {
+            throw new Error('animate_results: expected a non-empty array of { type, value }');
+        }
+        var notation = { set: [], constant: 0, result: [], resultTotal: 0, resultString: '', error: false };
+        for (var i = 0; i < dice.length; i++) {
+            var type = dice[i] && dice[i].type, value = dice[i] && dice[i].value;
+            if (CONSTS.known_types.indexOf(type) == -1) {
+                throw new Error('animate_results: unknown die type "' + type + '" at index ' + i);
+            }
+            var r = CONSTS.dice_face_range[type];
+            var min = r[0], max = r[1], step = 1;
+            if (type == 'd10') { min = 1; max = 10; } //d10 reports its '0' face as 10
+            if (type == 'd100') { min = 0; max = 90; step = 10; } //tens die
+            if (!Number.isInteger(value) || value < min || value > max || (value - min) % step != 0) {
+                throw new Error('animate_results: ' + value + ' is not a valid ' + type + ' result (index ' + i + ')');
+            }
+            notation.set.push(type);
+            notation.result.push(value);
+        }
+        return notation;
+    }
+
     function create_shape(vertices, faces, radius) {
         var cv = new Array(vertices.length), cf = new Array(faces.length);
         for (var i = 0; i < vertices.length; ++i) {
@@ -821,18 +866,28 @@ const DICE = (function() {
         return values;
     }
 
+    //relabels the faces so the face that landed up (showing res) shows value instead
+    //@param value - desired result, in the same units as get_dice_value returns
+    //@param res - result the emulated throw landed on
     function shift_dice_faces(dice, value, res) {
         var r = CONSTS.dice_face_range[dice.dice_type];
-        if (dice.dice_type == 'd10' && value == 10) value = 0;
-        if (!(value >= r[0] && value <= r[1])) return;
+        if (dice.dice_type == 'd10') { //get_dice_value reports the d10's '0' face as 10
+            if (value == 10) value = 0;
+            if (res == 10) res = 0;
+        }
+        if (dice.dice_type == 'd100') { //get_dice_value reports the tens die as 0, 10 ... 90
+            value /= 10;
+            res /= 10;
+        }
+        if (!Number.isInteger(value) || !(value >= r[0] && value <= r[1])) return;
+        if (!(res >= r[0] && res <= r[1])) return; //die fell off the table, nothing to shift from
         var num = value - res;
+        var faces = r[1] - r[0] + 1;
         var geom = dice.geometry.clone();
         for (var i = 0, l = geom.faces.length; i < l; ++i) {
             var matindex = geom.faces[i].materialIndex;
             if (matindex == 0) continue;
-            matindex += num - 1;
-            while (matindex > r[1]) matindex -= r[1];
-            while (matindex < r[0]) matindex += r[1];
+            matindex = r[0] + (((matindex - 1 + num - r[0]) % faces) + faces) % faces;
             geom.faces[i].materialIndex = matindex + 1;
         }
         if (dice.dice_type == 'd4' && num != 0) {
@@ -851,7 +906,9 @@ const DICE = (function() {
         outerContainer.appendChild(audio);
         audio.src = 'assets/nc93322.mp3'; //todo: make this configurable
         audio.volume = soundVolume;
-        audio.play();
+        //rolls started from code (no user gesture) can be blocked by the browser's autoplay policy
+        var played = audio.play();
+        if (played && played.catch) played.catch(() => audio.remove());
         audio.onended = () => {
           audio.remove();
         };
